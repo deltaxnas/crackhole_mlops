@@ -1,0 +1,28 @@
+[project]
+name = "yolo-automation"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "opencv-python>=4.6",
+    "pandas>=2.0",
+    "PyYAML>=6.0",
+    "shapely>=2.0",
+    "tqdm>=4.66",
+    "ultralytics>=8.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+demo = ["matplotlib>=3.8"]
+
+[project.scripts]
+yolo-pipeline = "yolo_pipeline.cli:main"
+yolo-demo = "yolo_pipeline.demo:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

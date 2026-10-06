@@ -1,0 +1,123 @@
+paths:
+  incoming: ./workspace/incoming
+  labeling: ./workspace/labeling
+  datasets: ./workspace/datasets
+  runs: ./workspace/runs
+  state_db: ./workspace/pipeline.db
+
+dataset:
+  val_fraction: 0.20
+  seed: 42
+  image_extensions: [.jpg, .jpeg, .png, .bmp]
+
+watcher:
+  settle_seconds: 10
+
+training:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  extra: {}
+
+tasks:
+  crack_detection:
+    done_marker: DONE_crack_det
+    type: detect
+    paths:
+      datasets: ./workspace/datasets/crack_detection
+      runs: ./workspace/runs/crack_detection
+    dataset:
+      class_names: [no_crack, crack]
+      # Optional immutable seed. Later runs automatically extend the previous
+      # dataset version for this task.
+      # base_yaml: ./base_datasets/crack_detection/data.yaml
+    training:
+      model: yolo11n.pt
+    evaluation:
+      # Use a fixed held-out Labelme benchmark, not the training batch.
+      data_dir: ./evaluation/crack_detection
+      output_dir: ./workspace/evaluations/crack_detection
+      confidence: 0.60
+      prediction_class_id: 1
+      ground_truth_labels: ["701"]
+      gt_iou_threshold: 0.001
+      duplicate_iou_threshold: 0.60
+      enable_crop_letterbox: false
+      enable_mask: false
+      # Set panel_gt_dir and enable cropping if the benchmark needs the old
+      # panel crop/letterbox behavior.
+      # panel_gt_dir: ./assets/panel_GT
+      letterbox_shape: [1088, 1280]
+      min_precision: 0.80
+      min_recall: 0.80
+      min_images: 1
+      fail_on_image_error: true
+      save_annotated_images: false
+      comparison:
+        enabled: true
+        metrics: [precision, recall]
+        # Reject a candidate if either metric drops by more than one point
+        # relative to the latest earlier approved crack model.
+        max_regression:
+          precision: 0.01
+          recall: 0.01
+    deployment:
+      destination: ./workspace/deployment/crack_detection
+      filename_metrics: [precision, recall]
+  hole_detection:
+    done_marker: DONE_hole_det
+    type: detect
+    paths:
+      datasets: ./workspace/datasets/hole_detection
+      runs: ./workspace/runs/hole_detection
+    dataset:
+      class_names: [hole]
+      # base_yaml: ./base_datasets/hole_detection/data.yaml
+    training:
+      model: yolo11n.pt
+    preprocessing:
+      # null maps every rectangle/polygon to class 0; use [hole] to filter.
+      labels: null
+    evaluation:
+      # Optional fixed YOLO benchmark. Otherwise use this dataset's val split.
+      # dataset_yaml: ./evaluation/hole_detection/data.yaml
+      output_dir: ./workspace/evaluations/hole_detection
+      min_precision: 0.20
+      min_recall: 0.20
+    deployment:
+      destination: ./workspace/deployment/hole_detection
+      filename_metrics: [precision, recall]
+  panel_segmentation:
+    done_marker: DONE_panel_seg
+    type: segment
+    paths:
+      datasets: ./workspace/datasets/panel_segmentation
+      runs: ./workspace/runs/panel_segmentation
+    dataset:
+      class_names: [panel]
+      # base_yaml: ./base_datasets/panel_segmentation/data.yaml
+    training:
+      model: yolo11n-seg.pt
+    preprocessing:
+      # Single-class polygons/rectangles; use [panel] or ["500"] to filter.
+      labels: null
+    evaluation:
+      # Mask metrics; a fixed benchmark is recommended for model comparison.
+      # dataset_yaml: ./evaluation/panel_segmentation/data.yaml
+      output_dir: ./workspace/evaluations/panel_segmentation
+      min_precision: 0.20
+      min_recall: 0.20
+    deployment:
+      destination: ./workspace/deployment/panel_segmentation
+      filename_metrics: [precision, recall]
+
+orchestrator:
+  poll_seconds: 5
+  retry_failed: false
+
+logging:
+  level: INFO
+  file: ./workspace/pipeline.log
+  max_bytes: 10485760
+  backup_count: 5
