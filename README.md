@@ -2,7 +2,7 @@
 
 A deliberately small pipeline for:
 
-`new images -> Labelme labeling -> task preprocessing -> YOLO dataset/YAML -> task model -> your evaluation`
+`new images -> Labelme labeling -> task preprocessing -> model dataset -> YOLO or Florence -> evaluation`
 
 SQLite stores durable state. Files store images, labels, datasets and weights. A task-specific `DONE_*` marker is the explicit handoff from the human labeler.
 
@@ -46,17 +46,109 @@ python -m yolo_pipeline.demo --config config.yaml --labelme /path/to/labelme/env
 
 The GUI searches PATH, the current environment, and a sibling Conda environment named `labelme`. If it cannot find Labelme, Open Labelme lets you locate its executable. Missing/crashed Labelme is reported in the GUI; its output is saved under `workspace/demo/labelme/`.
 
-1. **Choose task, then Select batch folder**: select Crack detection, Panel segmentation, or Hole detection in the top-right task selector, then choose a completed image folder. The GUI copies it directly to a new unique labeling batch and opens Labelme. Existing matching Labelme JSON annotations are also copied; the source remains untouched. Image stems must be unique because annotations share the image stem. No watcher or settling timer is involved; finish transferring the folder first.
-2. **Label**: save a Labelme JSON beside every image, including an empty `shapes` list for reviewed negative images. Save and close the Labelme window before proceeding. The crack preprocessor still requires the expected panel/camera filenames and local panel/hole-model assets; the GUI does not remove those existing requirements.
-3. **Mark done & train**: validate that annotations were saved, create the selected task's `DONE_*` marker, then run preprocessing, cumulative dataset creation, training, evaluation, and approved-model staging. A subprocess keeps the window responsive. Loss curves refresh from Ultralytics `results.csv` after each epoch; evaluation appears as a separate stage, followed by its report and metrics. **Stop training & evaluate** finishes the current epoch and checkpoint save, then automatically continues to evaluation using `best.pt` (or `last.pt` if no best checkpoint was saved). A request during the first epoch waits for that epoch to finish. Approval checks still apply; stopping never auto-approves a model.
-4. **Leaderboard**: completed models for the selected task appear ranked by F1, with precision, recall, and approval status. Each task has its own baseline. Segmentation uses **mask** precision/recall; holes use bounding-box metrics. Reports for both also include mAP50 and mAP50–95. Select a row to view its report or use its model for inference. The board uses the configured SQLite database, so existing CLI results also appear.
-5. **Inference**: select an input folder and a model from the board, or browse for a trusted local `.pt` file. Outputs go to a unique `workspace/demo/inference/<id>/` directory containing annotated images, YOLO labels with confidence, and `inference.json`. Nested input paths are preserved. Per-image failures are reported. This is inference on original images, without the annotation-dependent panel cropping used during crack training/evaluation; it does not change leaderboard scores.
+1. **Choose task and model, then Select batch folder**: choose YOLO or Florence VLM (crack detection only) using the Model selector; select Crack detection, Panel segmentation, or Hole detection in the top-right task selector, then choose a completed image folder. The GUI copies it directly to a new unique labeling batch and opens Labelme. Existing matching Labelme JSON annotations are also copied; the source remains untouched. Image stems must be unique because annotations share the image stem. No watcher or settling timer is involved; finish transferring the folder first.
+2. **Label**: save a Labelme JSON beside every image, including an empty `shapes` list for reviewed negative images. Save and close the Labelme window before proceeding. The YOLO crack preprocessor still requires the expected panel/camera filenames and local panel/hole-model assets; the GUI does not remove those existing requirements.
+3. **Mark done & train**: validate that annotations were saved, create the selected task's `DONE_*` marker, then run preprocessing, cumulative dataset creation, training, evaluation, and approved-model staging. A subprocess keeps the window responsive. Loss curves refresh from the training `results.csv` after each epoch; evaluation appears as a separate stage, followed by its report and metrics. **Stop training & evaluate** finishes the current epoch and checkpoint save, then automatically continues to evaluation using `best.pt` (or `last.pt` if no best checkpoint was saved). A request during the first epoch waits for that epoch to finish. Approval checks still apply; stopping never auto-approves a model.
+4. **Leaderboard**: completed models for the selected task appear ranked by F1, with precision, recall, and approval status. Each task and model backend has its own baseline; YOLO and Florence are not compared against each other. Segmentation uses **mask** precision/recall; holes use bounding-box metrics. Reports for both also include mAP50 and mAP50–95. Select a row to view its report or use its model for inference. The board uses the configured SQLite database, so existing CLI results also appear.
+5. **Inference**: select an input folder and a model from the board, or browse for a local `.pt` file (YOLO) or checkpoint folder (Florence). Outputs go to a unique `workspace/demo/inference/<id>/` directory containing annotated images, YOLO labels with confidence or Florence detection JSON, and `inference.json`. Nested input paths are preserved. Per-image failures are reported. This is inference on original images, without the annotation-dependent panel cropping used during crack training/evaluation; it does not change leaderboard scores.
 
 Demo approval uses a floor of **0.2 precision and 0.2 recall**. If there is no approved baseline (including an empty leaderboard), both floor values must be met. Otherwise both metrics must also meet or exceed the highest-F1 approved model's respective values, with zero allowed regression. Rejected models remain visible but do not become the baseline. Missing or malformed approved reports block comparison instead of silently falling back to 0.2. These demo rules are applied in memory and do not modify `config.yaml` or the CLI's thresholds.
 
-All three tasks are available. Crack detection retains its custom preprocessing and fixed Labelme benchmark. Panel segmentation and hole detection use the basic converter described below. Inference accepts compatible local YOLO weights, including segmentation masks. The worker saves each job's input configuration and complete log under `workspace/demo/jobs/`. Restarting the GUI preserves batch and leaderboard records; select an unfinished/failed batch and choose **Resume / retry**. Closing the GUI during a job terminates the worker after confirmation; this is different from **Stop training & evaluate**, which keeps the worker running through evaluation. Interrupted training resumes by rerunning the stage, not by continuing a partial epoch.
+All three tasks are available. YOLO crack detection retains its custom preprocessing and fixed Labelme benchmark. Florence uses original images and its own JSONL evaluation split, described below. Panel segmentation and hole detection use the basic converter described below. Inference accepts compatible local YOLO weights, including segmentation masks. The worker saves each job's input configuration and complete log under `workspace/demo/jobs/`. Restarting the GUI preserves batch and leaderboard records; select an unfinished/failed batch and choose **Resume / retry**. Closing the GUI during a job terminates the worker after confirmation; this is different from **Stop training & evaluate**, which keeps the worker running through evaluation. Interrupted training resumes by rerunning the stage, not by continuing a partial epoch.
 
 Use the GUI **instead of** a running `yolo-pipeline run`/`once`/`watch` process against the same database. Demo jobs have a mutual-exclusion lock, but the existing CLI does not participate in that lock. The configured benchmark must also remain fixed when comparing model reports. No production model rollout is performed.
+
+## Optional Florence VLM for cracks
+
+The Florence path adapts the supplied `florence/` scripts into the pipeline; those
+reference scripts remain unchanged and are not required at runtime. Install the
+optional dependencies in your training environment:
+
+```bash
+pip install -e ".[demo,florence]"
+python -m yolo_pipeline.demo --config config.yaml
+```
+
+Choose **Crack detection → Florence VLM** before importing a batch. Hole detection
+and panel segmentation remain on YOLO. The GUI choice is recorded per imported
+batch and affects preprocessing, training, evaluation, inference, and leaderboard
+filtering. For the CLI/watcher, set `model_backend: florence` globally or under
+`tasks.crack_detection`. The example config explicitly keeps other tasks on YOLO.
+Existing database rows migrate to `yolo`; status in read-only mode still works
+before migration.
+
+Florence settings are separate from the existing YOLO `training` settings:
+
+```yaml
+model_backend: yolo
+florence:
+  group_by_capture: false         # Optional capture-based splitting
+  model: microsoft/Florence-2-base  # Hugging Face ID or local checkpoint folder
+  device: 0                      # one CUDA device, cpu, or auto
+  epochs: 10
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00001
+  freeze_vision_encoder: false
+  max_new_tokens: 1024
+  num_beams: 3
+  iou_threshold: 0.5
+  labels: null                   # all shapes; or ["701", "crack"] for mixed labels
+  # base_dataset_dir: ./base_datasets/florence
+  # evaluation_jsonl: ./evaluation/florence/validation.jsonl
+```
+
+The default starting checkpoint is Microsoft's
+[Florence-2-base](https://huggingface.co/microsoft/Florence-2-base), using `<OD>`
+prompts and one class named `crack`. The first use downloads model files unless a
+local checkpoint/cache is provided. The optional dependency range uses
+Transformers 4.49, matching the colleague's remote-code workflow. Loading uses
+`trust_remote_code: true`; use a trusted model source. `revision` can pin a Hub
+commit and `local_files_only: true` prevents downloads once files are available.
+
+- **Labels and images:** rectangles become boxes; polygons become their bounding
+  boxes. Each selected shape becomes `crack`, encoded as four `<loc_0>` through
+  `<loc_999>` tokens. All original images are retained, without YOLO's panel crop,
+  hole model, or filename requirement. Every image needs valid Labelme JSON;
+  reviewed negatives have `shapes: []` and an empty target string. Malformed,
+  out-of-bounds, or unsupported shapes fail conversion. Zero-area boxes are
+  skipped with a filename/shape warning and recorded in `skipped_zero_area_shapes`
+  when valid boxes remain. If all selected boxes are zero-area, conversion fails
+  instead of treating the image as a negative. Polygon topology is not required
+  for Florence detection; the bounding box must have positive width and height.
+  Source annotations are never edited. Use `florence.labels` to
+  filter mixed annotations; other labels are excluded.
+- **Datasets:** `train.jsonl` and `validation.jsonl` contain `image`, `prefix`, and
+  `suffix`, plus grouping metadata. Images are copied into each dataset version.
+  Exact file duplicates are deduplicated; conflicting annotations fail rather
+  than silently choosing one. By default, individual images are split using
+  `dataset.val_fraction` and `dataset.seed`, so a batch from one capture works.
+  Set `florence.group_by_capture: true` to keep camera names containing
+  `D<timestamp>_P<position>_S` together; other names group by image hash. At least
+  two distinct images (or capture groups when enabled) are needed for both splits.
+  Exact duplicates never cross splits, even with capture grouping disabled. Cumulative
+  versions preserve existing splits and only extend earlier Florence datasets.
+  Enabling capture grouping later fails if those existing splits already share a
+  capture; rebuild the seed dataset or keep grouping disabled in that case.
+  A `base_dataset_dir` accepts the colleague's JSONL format as a seed. JSONL image
+  paths must resolve inside that dataset directory.
+- **Training:** full fine-tuning with AdamW and masked token loss, optional vision
+  encoder freezing, and gradient accumulation. Loss curves update each epoch.
+  `Stop training & evaluate` finishes the epoch and validation, saves the best
+  validation-loss checkpoint, and continues to pipeline evaluation. Checkpoints
+  are directories containing weights, model code/config, tokenizer, and processor
+  files. Training retries start the stage again from `florence.model`; optimizer
+  state and partial epochs are not resumed. Multi-GPU training is not implemented.
+- **Evaluation:** class-aware, one-to-one box matching at `florence.iou_threshold`
+  gives precision/recall/TP/FP/FN. The demo's 0.2 floor and no-regression comparison
+  apply within the Florence leaderboard. By default evaluation uses the generated
+  validation split. For meaningful comparisons across versions, configure a fixed
+  `florence.evaluation_jsonl` benchmark. This does not reuse the YOLO crop evaluator
+  or its `evaluation.data_dir`. No mAP or per-box confidence is claimed for Florence.
+- **Outputs:** datasets and runs live under a `florence/` subdirectory of the
+  configured task roots. Approved checkpoint directories are copied in full to
+  deployment staging. Inference accepts a checkpoint directory and saves image
+  overlays, per-image detection JSON, and an `inference.json` manifest.
 
 ## Workflow
 
@@ -64,7 +156,7 @@ Use the GUI **instead of** a running `yolo-pipeline run`/`once`/`watch` process 
 2. After the directory is unchanged for `settle_seconds`, the watcher copies images into a temporary directory, checks that the source is still unchanged, and publishes `labeling/<batch_id>/`. The orchestrator then enters `LABELING`. It deliberately does not create a YOLO directory structure.
 3. Open the generated `labeling/<batch_id>/` directory in Labelme. Save each Labelme `.json` annotation beside its image.
 4. When labeling is finished, create exactly one task marker: `DONE_crack_det`, `DONE_hole_det`, or `DONE_panel_seg`.
-5. The orchestrator derives and persists the task from that marker, calls its preprocessing hook, creates the task's YOLO dataset and `data.yaml`, trains its configured model, and evaluates it.
+5. The orchestrator derives and persists the task from that marker, calls its preprocessing hook, creates its YOLO dataset/YAML or Florence JSONL dataset, trains its configured model, and evaluates it. The model backend is persisted when the task is selected; later config changes do not switch an existing run's backend.
 
 New batch IDs use a UTC timestamp and a UUID, independently of the incoming folder name, for example `20260911T091500123456Z_96a63a7524db4a2280d66a94b02e8a63`. The original folder name and path are recorded in `BATCH_INFO.txt`. Use the generated ID shown by `status`, the logs, or the labeling directory for retry/rerun commands. In the examples below, `batch_0001` stands for that ID. Existing runs retain their old IDs and artifact paths.
 
@@ -207,12 +299,12 @@ Any exception produces `FAILED` with the error in SQLite. State changes use comp
 
 The SQLite file contains two tables:
 
-- `pipeline_runs`: numeric run ID, unique batch ID, task, current state, labeling batch path, selected base-dataset YAML, generated dataset path, latest trained model path, latest evaluation report path, deployment-staging path, training/evaluation attempt numbers, last error, and created/updated timestamps.
+- `pipeline_runs`: numeric run ID, unique batch ID, task, model backend, current state, labeling batch path, selected base-dataset YAML, generated dataset path, latest trained model path, latest evaluation report path, deployment-staging path, training/evaluation attempt numbers, last error, and created/updated timestamps.
 - `state_events`: an append-only transition history containing the run ID, old/new states, transition message, and timestamp.
 
 It does **not** contain images, Labelme JSON files, generated YOLO files, model weights, logs, configuration, or in-progress Ultralytics optimizer checkpoints. Those remain at the filesystem paths recorded by the database.
 
-The default `.gitignore` excludes the whole `workspace/` directory, including `pipeline.db` and all data. A normal Git push and later pull therefore does not restore pipeline state. To resume on another checkout, back up/restore the database **together with** the referenced `labeling/`, `datasets/`, and `runs/` files at compatible paths (and the same configuration). Stop the service before copying SQLite, or use SQLite's online backup facility. Committing a live database is not recommended.
+The default `.gitignore` allows `workspace/pipeline.db` to be committed for history. Weights, datasets, evaluation reports, and other workspace outputs remain excluded. To resume on another checkout or populate leaderboard metrics, restore the database **together with** its referenced labeling, datasets, model checkpoints, and evaluation reports at compatible paths (and the same configuration). Stop the service before copying/committing SQLite, or use SQLite's online backup facility. Temporary SQLite sidecar files stay ignored.
 
 With a consistent database and files, startup recovery resumes at a stage boundary: interrupted preprocessing/dataset building returns to `LABELING_COMPLETE`, training to `DATASET_READY`, and evaluation to `TRAINING_COMPLETE`. It reruns that whole stage; it does not resume midway through an epoch.
 
@@ -251,7 +343,7 @@ With this enabled (the default), reviewed images without cracks are kept. Existi
 
 ## Training
 
-Training is intentionally just the Ultralytics call in `training.py`:
+YOLO training uses the Ultralytics call in `training.py`:
 
 ```python
 YOLO(model_name).train(data=data_yaml, epochs=100, ...)
@@ -335,5 +427,5 @@ This directory is a handoff boundary, not an automatic production rollout. A dep
 - Each incoming subdirectory is one batch.
 - Crack detection has custom preprocessing/evaluation; hole detection and panel segmentation have basic single-class Labelme conversion and native YOLO validation.
 - New batch IDs are generated from UTC timestamps and UUIDs across all tasks; incoming folder names may be reused.
-- Dataset versions accumulate prior successfully built batches independently per task.
+- Dataset versions accumulate prior successfully built batches independently per task and model backend.
 - Approved models are copied to local deployment staging; production rollout, registries, CVAT, Ray, MLflow, cloud services, and checkpoint-by-checkpoint evaluation remain out of scope.
