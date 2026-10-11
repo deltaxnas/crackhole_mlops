@@ -36,7 +36,8 @@ def stage_approved_model(
     if not destination_text:
         raise ValueError(f"deployment destination is not configured for {task_name}")
     source = Path(model_path)
-    if not source.is_file():
+    is_florence = config.get("model_backend") == "florence"
+    if not (source.is_dir() if is_florence else source.is_file()):
         raise FileNotFoundError(f"approved model does not exist: {source}")
     destination = Path(destination_text)
     destination.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,12 @@ def stage_approved_model(
         if metric in metrics:
             metric_parts.append(f"{_safe_name(metric)}-{float(metrics[metric]):.4f}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    digest = _sha256(source)[:12]
+    digest = (
+        hashlib.sha256("\n".join(
+            f"{path.relative_to(source).as_posix()}:{_sha256(path)}"
+            for path in sorted(source.rglob("*")) if path.is_file()
+        ).encode()).hexdigest()[:12] if is_florence else _sha256(source)[:12]
+    )
     parts = [
         _safe_name(task_name),
         f"batch-{_safe_name(batch_id)}",
@@ -56,12 +62,18 @@ def stage_approved_model(
         timestamp,
         f"sha256-{digest}",
     ]
-    target = destination / ("__".join(parts) + source.suffix)
+    target = destination / ("__".join(parts) + ("" if is_florence else source.suffix))
     temporary = destination / f".{target.name}.{uuid4().hex}.tmp"
     try:
-        shutil.copy2(source, temporary)
+        if is_florence:
+            shutil.copytree(source, temporary)
+        else:
+            shutil.copy2(source, temporary)
         temporary.replace(target)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            if temporary.is_dir():
+                shutil.rmtree(temporary)
+            else:
+                temporary.unlink()
     return target

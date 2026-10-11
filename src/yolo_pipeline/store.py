@@ -60,6 +60,8 @@ class StateStore:
             """)
             # Migrate databases created by versions that predate multi-task runs.
             columns = {row["name"] for row in db.execute("PRAGMA table_info(pipeline_runs)")}
+            if "model_backend" not in columns:
+                db.execute("ALTER TABLE pipeline_runs ADD COLUMN model_backend TEXT NOT NULL DEFAULT 'yolo'")
             if "source_key" not in columns:
                 db.execute("ALTER TABLE pipeline_runs ADD COLUMN source_key TEXT")
             db.execute(
@@ -110,15 +112,16 @@ class StateStore:
             return result.rowcount == 1
 
     def create(
-        self, batch_id: str, batch_path: str, *, source_key: str | None = None
+        self, batch_id: str, batch_path: str, *, source_key: str | None = None,
+        model_backend: str = "yolo",
     ) -> PipelineRun | None:
         now = datetime.now(timezone.utc).isoformat()
         with self.connection() as db:
             try:
                 cursor = db.execute(
-                    "INSERT INTO pipeline_runs(batch_id,state,batch_path,created_at,updated_at,source_key) "
-                    "VALUES(?,?,?,?,?,?)",
-                    (batch_id, State.NEW_DATA, batch_path, now, now, source_key),
+                    "INSERT INTO pipeline_runs(batch_id,state,batch_path,created_at,updated_at,source_key,model_backend) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (batch_id, State.NEW_DATA, batch_path, now, now, source_key, model_backend),
                 )
             except sqlite3.IntegrityError:
                 return None
@@ -168,28 +171,28 @@ class StateStore:
             ).fetchall()
         return [self._run(row) for row in rows]
 
-    def latest_prior_dataset(self, task: str, before_run_id: int) -> str | None:
+    def latest_prior_dataset(self, task: str, before_run_id: int, model_backend: str = "yolo") -> str | None:
         """Return the preceding immutable dataset version for cumulative training."""
         with self.connection() as db:
             row = db.execute(
                 """
                 SELECT dataset_path FROM pipeline_runs
-                WHERE task=? AND id<? AND dataset_path IS NOT NULL
+                WHERE task=? AND id<? AND dataset_path IS NOT NULL AND model_backend=?
                 ORDER BY id DESC LIMIT 1
                 """,
-                (task, before_run_id),
+                (task, before_run_id, model_backend),
             ).fetchone()
         return row["dataset_path"] if row else None
 
-    def previous_approved(self, task: str, before_run_id: int) -> PipelineRun | None:
+    def previous_approved(self, task: str, before_run_id: int, model_backend: str = "yolo") -> PipelineRun | None:
         with self.connection() as db:
             row = db.execute(
                 """
                 SELECT * FROM pipeline_runs
-                WHERE task=? AND id<? AND state=?
+                WHERE task=? AND id<? AND state=? AND model_backend=?
                 ORDER BY id DESC LIMIT 1
                 """,
-                (task, before_run_id, State.APPROVED),
+                (task, before_run_id, State.APPROVED, model_backend),
             ).fetchone()
         return self._run(row) if row else None
 
@@ -224,10 +227,10 @@ class StateStore:
                 descendant = db.execute(
                     """
                     SELECT batch_id FROM pipeline_runs
-                    WHERE task=? AND id>?
+                    WHERE task=? AND id>? AND model_backend=?
                     ORDER BY id LIMIT 1
                     """,
-                    (run.task, run.id),
+                    (run.task, run.id, run.model_backend),
                 ).fetchone()
                 if descendant:
                     raise ValueError(
@@ -332,7 +335,7 @@ class StateStore:
     def transition(self, run_id: int, expected: State, new: State, message: str = "", **fields) -> bool:
         allowed = {
             "task", "base_dataset_path", "dataset_path", "model_path",
-            "evaluation_path", "deployment_path", "error",
+            "evaluation_path", "deployment_path", "error", "model_backend",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -367,4 +370,5 @@ class StateStore:
             deployment_path=row["deployment_path"], error=row["error"],
             training_attempt=row["training_attempt"],
             evaluation_attempt=row["evaluation_attempt"],
+            model_backend=row["model_backend"] if "model_backend" in row.keys() else "yolo",
         )

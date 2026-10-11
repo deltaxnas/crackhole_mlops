@@ -24,12 +24,12 @@ def main():
         config = job["config"]
         with worker_lock(config["paths"]["state_db"]):
             if job["action"] == "import":
-                run = import_batch(config, job["source"], emit, task_name=job.get("task", TASK))
+                run = import_batch(config, job["source"], emit, task_name=job.get("task", TASK), model_backend=job.get("model_backend"))
                 emit(kind="imported", batch_id=run.batch_id)
             elif job["action"] == "train":
                 run_training(config, job["batch_id"], emit, stop_file=job.get("stop_file"))
             elif job["action"] == "infer":
-                report = run_inference(config, job["source"], job["model"], job["output"], emit, task_name=job.get("task", TASK))
+                report = run_inference(config, job["source"], job["model"], job["output"], emit, task_name=job.get("task", TASK), model_backend=job.get("model_backend"))
                 emit(kind="inferred", output=job["output"], processed=report["processed"], errors=len(report["errors"]))
             else:
                 raise ValueError(f"Unknown demo action: {job['action']}")

@@ -22,6 +22,9 @@ def evaluate(
 ) -> EvaluationResult:
     """Dispatch evaluation for the task selected by the DONE marker."""
     task_name = config["task_name"]
+    if config.get("model_backend") == "florence":
+        from .florence_backend import evaluate_florence
+        return evaluate_florence(model_path, dataset_yaml, config, batch_id, evaluation_attempt)
     if task_name == "crack_detection":
         from .crack_det_eval import evaluate_crack_model
 

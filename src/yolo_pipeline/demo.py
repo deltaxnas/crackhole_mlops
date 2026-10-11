@@ -19,6 +19,8 @@ from .demo_backend import FLOOR, TASK, TASKS, leaderboard, training_history, uni
 from .models import State
 from .store import StateStore
 
+BACKENDS = {"YOLO": "yolo", "Florence VLM": "florence"}
+
 
 def find_labelme() -> str:
     found = shutil.which("labelme")
@@ -45,6 +47,8 @@ class DemoApp:
         self.batch_names = {}
         self.task_choices = {label: task for task, label in TASKS.items() if task in config.get("tasks", {})}
         self.task_selection = tk.StringVar(value=next(iter(self.task_choices)))
+        backend = for_task(config, self.selected_task())["model_backend"]
+        self.backend_selection = tk.StringVar(value=next(label for label, value in BACKENDS.items() if value == backend))
         self.stop_file = None
         self.stop_requested = False
         self.job_action = self.job_error = self.last_output = self.history_key = None
@@ -85,6 +89,11 @@ class DemoApp:
         self.task_combo.pack(side="right")
         self.task_combo.bind("<<ComboboxSelected>>", self.change_task)
         ttk.Label(header, text="Task  ").pack(side="right")
+        self.backend_combo = ttk.Combobox(header, textvariable=self.backend_selection,
+                                         values=list(BACKENDS), state="readonly", width=14)
+        self.backend_combo.pack(side="right", padx=(8, 12))
+        self.backend_combo.bind("<<ComboboxSelected>>", self.change_task)
+        ttk.Label(header, text="Model  ").pack(side="right")
         ttk.Label(shell, textvariable=self.summary, wraplength=1120).pack(anchor="w", pady=(8, 12))
         actions = ttk.Frame(shell)
         actions.pack(fill="x")
@@ -133,7 +142,7 @@ class DemoApp:
         self.details.pack(fill="x", pady=(8, 0))
         board_tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(board_tab, text="Leaderboard")
-        ttk.Label(board_tab, text="Current task, ranked by F1 · segmentation uses mask precision/recall",
+        ttk.Label(board_tab, text="Current task and model type, ranked by F1 · segmentation uses mask precision/recall",
                   wraplength=700).pack(anchor="w", pady=(0, 8))
         columns = ("rank", "batch", "precision", "recall", "f1", "status")
         self.board = ttk.Treeview(board_tab, columns=columns, show="headings", selectmode="browse")
@@ -158,7 +167,8 @@ class DemoApp:
         models.pack(fill="x", pady=(4, 12))
         self.model_combo = ttk.Combobox(models, textvariable=self.infer_model, state="readonly")
         self.model_combo.pack(side="left", fill="x", expand=True)
-        ttk.Button(models, text="Browse .pt…", command=self.choose_model).pack(side="left", padx=(8, 0))
+        self.browse_model_button = ttk.Button(models, text="Browse model…", command=self.choose_model)
+        self.browse_model_button.pack(side="left", padx=(8, 0))
         ttk.Label(self.inference_tab, text="Runs on original images. Saves annotated images and labels; "
                   "panel cropping requires annotations and is not applied here.", wraplength=650).pack(anchor="w", pady=(0, 16))
         self.infer_button = ttk.Button(self.inference_tab, text="Run inference", style="Accent.TButton", command=self.infer)
@@ -187,14 +197,19 @@ class DemoApp:
     def selected_task(self):
         return self.task_choices[self.task_selection.get()]
 
+    def selected_backend(self):
+        return BACKENDS[self.backend_selection.get()]
+
     def change_task(self, _event=None):
         if self.process is not None:
             return
+        if self.selected_task() != TASK:
+            self.backend_selection.set("YOLO")
         self.batch_id = self.history_key = None
         self.model_choices.clear()
         self.infer_model.set("")
         self.batch_text.set("No batch selected")
-        self.status.set(f"{self.task_selection.get()}: select a batch folder to begin.")
+        self.status.set(f"{self.task_selection.get()} · {self.backend_selection.get()}: select a batch folder to begin.")
         self.summary.set("Import images → label in Labelme → mark done → train and evaluate")
         self.progress["value"] = 0
         self.draw_history([])
@@ -209,6 +224,7 @@ class DemoApp:
         folder = self.work / "jobs" / unique_id()
         folder.mkdir(parents=True)
         fields.setdefault("task", self.selected_task())
+        fields.setdefault("model_backend", self.selected_backend())
         self.stop_file = folder / "STOP_TRAINING" if action == "train" else None
         self.stop_requested = False
         if self.stop_file:
@@ -298,7 +314,9 @@ class DemoApp:
             self.infer_source.set(folder)
 
     def choose_model(self):
-        path = filedialog.askopenfilename(title="Choose model weights", filetypes=[("YOLO weights", "*.pt")])
+        path = (filedialog.askdirectory(title="Choose Florence checkpoint folder (best)")
+                if self.selected_backend() == "florence" else
+                filedialog.askopenfilename(title="Choose model weights", filetypes=[("YOLO weights", "*.pt")]))
         if path:
             label = f"Local: {path}"
             self.model_choices[label] = path
@@ -344,6 +362,8 @@ class DemoApp:
         self.import_button.configure(state="disabled" if busy else "normal")
         self.infer_button.configure(state="disabled" if busy else "normal")
         self.task_combo.configure(state="disabled" if busy else "readonly")
+        self.backend_combo.configure(state="disabled" if busy or self.selected_task() != TASK else "readonly")
+        self.browse_model_button.configure(text="Browse checkpoint folder…" if self.selected_backend() == "florence" else "Browse .pt…")
         can_stop = busy and self.job_action == "train" and run and run.state == State.TRAINING and not self.stop_requested
         self.stop_button.configure(state="normal" if can_stop else "disabled")
         self.label_button.configure(state="normal" if not busy and run and run.state == State.LABELING else "disabled")
@@ -352,7 +372,7 @@ class DemoApp:
                                     text="3  Mark done & train" if not run or run.state == State.LABELING else "Resume / retry")
 
     def refresh(self):
-        runs = [run for run in self.store.list_all() if run.task == self.selected_task()]
+        runs = [run for run in self.store.list_all() if run.task == self.selected_task() and run.model_backend == self.selected_backend()]
         self.runs = {str(run.id): run for run in runs}
         for item in self.batches.get_children():
             if item not in self.runs:
@@ -363,7 +383,7 @@ class DemoApp:
                 self.batches.item(str(run.id), values=values)
             else:
                 self.batches.insert("", "end", iid=str(run.id), values=values)
-        rows = leaderboard(self.store, self.selected_task())
+        rows = leaderboard(self.store, self.selected_task(), model_backend=self.selected_backend())
         self.model_choices = {key: value for key, value in self.model_choices.items() if key.startswith("Local: ")}
         self.board_rows = {str(row["run"].id): row for row in rows}
         selected = self.board.selection()
@@ -376,7 +396,7 @@ class DemoApp:
                        for key in ("precision", "recall", "f1")]
             self.board.insert("", "end", iid=str(run.id), values=(rank, self.batch_title(run), *metrics,
                               "Report error" if row["error"] else run.state.value.title()))
-            if run.model_path and Path(run.model_path).is_file():
+            if run.model_path and (Path(run.model_path).is_dir() if run.model_backend == "florence" else Path(run.model_path).is_file()):
                 self.model_choices[self.model_title(run)] = run.model_path
         if selected and self.board.exists(selected[0]):
             self.board.selection_set(selected[0])
@@ -408,13 +428,15 @@ class DemoApp:
             self.history_key = key
         if history and self.job_action not in {"import", "infer"}:
             epoch = int(history[-1]["epoch"])
-            epochs = for_task(self.config, run.task or TASK)["training"]["epochs"]
+            task_config = for_task(self.config, run.task or TASK, run.model_backend)
+            epochs = (task_config["florence"].get("epochs", 10) if run.model_backend == "florence"
+                      else task_config["training"]["epochs"])
             self.summary.set(f"Training epoch {epoch}/{epochs} · losses update after each completed epoch")
             self.progress["value"] = min(100, epoch / max(1, epochs) * 100)
         else:
             self.summary.set("Import images → label in Labelme → mark done → train and evaluate")
         row = self.board_rows.get(str(run.id))
-        text = f"Stage: {run.state.value}\nLabeling folder: {run.batch_path}"
+        text = f"Stage: {run.state.value} · Model: {run.model_backend}\nLabeling folder: {run.batch_path}"
         if run.error:
             text += f"\nError: {run.error}"
         if row:
@@ -521,7 +543,7 @@ class DemoApp:
         if not selection:
             return
         run = self.board_rows[selection[0]]["run"]
-        if not run.model_path or not Path(run.model_path).is_file():
+        if not run.model_path or not (Path(run.model_path).is_dir() if run.model_backend == "florence" else Path(run.model_path).is_file()):
             messagebox.showerror("Model unavailable", "The recorded model file is missing. Browse for another model.")
             return
         self.infer_model.set(self.model_title(run))

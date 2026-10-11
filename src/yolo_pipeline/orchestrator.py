@@ -4,7 +4,7 @@ import logging
 import time
 from pathlib import Path
 
-from .config import for_task
+from .config import for_task, model_backend
 from .dataset import build_dataset
 from .deployment import stage_approved_model
 from .evaluation_adapter import compare_with_previous, evaluate
@@ -27,14 +27,28 @@ class Orchestrator:
             elif run.state == State.LABELING:
                 task_name = self._completed_task(run)
                 if task_name:
+                    backend = run.model_backend if run.task else model_backend(
+                        self.config["tasks"][task_name].get("model_backend", self.config.get("model_backend", "yolo"))
+                    )
                     log.info("[%s] Task marker detected | task=%s", run.batch_id, task_name)
                     self.store.transition(
                         run.id, run.state, State.LABELING_COMPLETE,
-                        "task-specific DONE marker found", task=task_name,
+                        "task-specific DONE marker found", task=task_name, model_backend=backend,
                     )
             elif run.state == State.LABELING_COMPLETE:
-                task_config = for_task(self.config, self._require_task(run))
+                task_config = for_task(self.config, self._require_task(run), run.model_backend)
                 if self.store.transition(run.id, run.state, State.DATASET_BUILDING, "starting preprocessing"):
+                    if run.model_backend == "florence":
+                        from .florence_data import build_florence_dataset
+
+                        previous = self.store.latest_prior_dataset(run.task, run.id, run.model_backend)
+                        base = previous or task_config["florence"].get("base_dataset_dir")
+                        dataset = build_florence_dataset(task_config, run.batch_id, run.batch_path, base)
+                        self.store.transition(
+                            run.id, State.DATASET_BUILDING, State.DATASET_READY,
+                            "Florence dataset ready", base_dataset_path=base, dataset_path=str(dataset),
+                        )
+                        return
                     converted_batch = preprocess_labelme_batch(
                         task_config, run.task, run.batch_path
                     )
@@ -62,9 +76,13 @@ class Orchestrator:
                         dataset_path=str(dataset),
                     )
             elif run.state == State.DATASET_READY:
-                task_config = for_task(self.config, self._require_task(run))
-                if self.store.transition(run.id, run.state, State.TRAINING, "starting Ultralytics training"):
-                    model = train_yolo(
+                task_config = for_task(self.config, self._require_task(run), run.model_backend)
+                if self.store.transition(run.id, run.state, State.TRAINING, f"starting {run.model_backend} training"):
+                    trainer = train_yolo
+                    if run.model_backend == "florence":
+                        from .florence_backend import train_florence
+                        trainer = train_florence
+                    model = trainer(
                         task_config,
                         run.batch_id,
                         run.dataset_path,
@@ -75,7 +93,7 @@ class Orchestrator:
                         "trained checkpoint ready", model_path=str(model),
                     )
             elif run.state == State.TRAINING_COMPLETE:
-                task_config = for_task(self.config, self._require_task(run))
+                task_config = for_task(self.config, self._require_task(run), run.model_backend)
                 if self.store.transition(run.id, run.state, State.EVALUATING, "starting evaluation"):
                     log.info("[%s] Evaluating model | model=%s", run.batch_id, run.model_path)
                     result = evaluate(
@@ -85,7 +103,7 @@ class Orchestrator:
                         run.batch_id,
                         run.evaluation_attempt,
                     )
-                    previous = self.store.previous_approved(run.task, run.id)
+                    previous = self.store.previous_approved(run.task, run.id, run.model_backend)
                     result = compare_with_previous(
                         result,
                         task_config,

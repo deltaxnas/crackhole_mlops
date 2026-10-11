@@ -33,3 +33,4 @@ class PipelineRun:
     training_attempt: int
     evaluation_attempt: int
     error: str | None
+    model_backend: str = "yolo"

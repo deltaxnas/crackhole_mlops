@@ -4,11 +4,29 @@ from pathlib import Path
 import yaml
 
 
+def model_backend(value: str) -> str:
+    value = str(value).lower()
+    if value == "vlm":
+        value = "florence"
+    if value not in {"yolo", "florence"}:
+        raise ValueError(f"Unknown model_backend: {value}; choose yolo or florence")
+    return value
+
+
 def load_config(path: str | Path) -> dict:
     config_path = Path(path).resolve()
     with config_path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
     base = config_path.parent
+    for section in [config, *config.get("tasks", {}).values()]:
+        if "model_backend" in section:
+            section["model_backend"] = model_backend(section["model_backend"])
+        options = section.get("florence", {})
+        for key in ("base_dataset_dir", "evaluation_jsonl"):
+            if options.get(key):
+                options[key] = str((base / options[key]).resolve())
+        if options.get("model") and (str(options["model"]).startswith((".", "/", "~")) or (base / options["model"]).exists()):
+            options["model"] = str((base / Path(options["model"]).expanduser()).resolve())
     for key in ("incoming", "labeling", "datasets", "runs", "state_db"):
         value = Path(config["paths"][key])
         config["paths"][key] = str(value if value.is_absolute() else (base / value).resolve())
@@ -53,7 +71,7 @@ def ensure_directories(config: dict) -> None:
             Path(path).mkdir(parents=True, exist_ok=True)
 
 
-def for_task(config: dict, task_name: str) -> dict:
+def for_task(config: dict, task_name: str, backend: str | None = None) -> dict:
     """Return shared configuration with one task's overrides applied."""
     try:
         task = config["tasks"][task_name]
@@ -74,4 +92,13 @@ def for_task(config: dict, task_name: str) -> dict:
     resolved["deployment"] = {
         **config.get("deployment", {}), **task.get("deployment", {})
     }
+    resolved["model_backend"] = model_backend(backend or task.get("model_backend", config.get("model_backend", "yolo")))
+    resolved["florence"] = {**config.get("florence", {}), **task.get("florence", {})}
+    if resolved["model_backend"] == "florence":
+        if task_name != "crack_detection":
+            raise ValueError("Florence currently supports crack_detection only; use YOLO for other tasks")
+        for key in ("datasets", "runs"):
+            resolved["paths"][key] = str(Path(resolved["paths"][key]) / "florence")
+        if resolved["deployment"].get("destination"):
+            resolved["deployment"]["destination"] = str(Path(resolved["deployment"]["destination"]) / "florence")
     return resolved

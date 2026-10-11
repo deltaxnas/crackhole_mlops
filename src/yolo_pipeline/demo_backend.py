@@ -40,11 +40,11 @@ def demo_config(config: dict, task_name: str = TASK) -> dict:
     return result
 
 
-def leaderboard(store: StateStore, task: str = TASK, exclude_id: int | None = None) -> list[dict]:
+def leaderboard(store: StateStore, task: str = TASK, exclude_id: int | None = None, model_backend: str = "yolo") -> list[dict]:
     """Only completed evaluations belong on the board; surface broken reports."""
     rows = []
     for run in store.list_all():
-        if run.task != task or run.id == exclude_id or run.state not in {State.APPROVED, State.REJECTED}:
+        if run.task != task or run.model_backend != model_backend or run.id == exclude_id or run.state not in {State.APPROVED, State.REJECTED}:
             continue
         try:
             if not run.evaluation_path:
@@ -63,9 +63,9 @@ def leaderboard(store: StateStore, task: str = TASK, exclude_id: int | None = No
 
 
 class DemoStore(StateStore):
-    def previous_approved(self, task: str, before_run_id: int):
+    def previous_approved(self, task: str, before_run_id: int, model_backend: str = "yolo"):
         """The demo compares against the highest-F1 approved model on its board."""
-        approved = [row for row in leaderboard(self, task, before_run_id)
+        approved = [row for row in leaderboard(self, task, before_run_id, model_backend)
                     if row["run"].state == State.APPROVED]
         broken = [row for row in approved if row["error"]]
         if broken:
@@ -122,10 +122,11 @@ def _signature(paths: list[Path]) -> list[tuple]:
             for path in paths]
 
 
-def import_batch(config: dict, source: str, emit=lambda **event: None, task_name: str = TASK):
+def import_batch(config: dict, source: str, emit=lambda **event: None, task_name: str = TASK, model_backend: str | None = None):
     """Explicitly import a finished folder and enter LABELING without a watcher."""
     if task_name not in TASKS or task_name not in config.get("tasks", {}):
         raise ValueError(f"Unsupported or unconfigured task: {task_name}")
+    backend = for_task(config, task_name, model_backend)["model_backend"]
     source = Path(source).resolve()
     labeling = Path(config["paths"]["labeling"]).resolve()
     if source == labeling or source in labeling.parents:
@@ -153,13 +154,13 @@ def import_batch(config: dict, source: str, emit=lambda **event: None, task_name
         if before != _signature(current_images + current_annotations):
             raise ValueError("The source changed while copying. Finish transferring it and select it again.")
         (staged / "BATCH_INFO.txt").write_text(
-            f"batch_id={batch_id}\ntask={task_name}\nsource_name={source.name}\nsource_path={source}\n"
+            f"batch_id={batch_id}\ntask={task_name}\nmodel_backend={backend}\nsource_name={source.name}\nsource_path={source}\n"
             "Imported manually in the demo GUI. Save annotations beside the images, "
             "then use Mark done & train in the main window.\n", encoding="utf-8",
         )
         staged.rename(destination)
         try:
-            run = store.create(batch_id, str(destination))
+            run = store.create(batch_id, str(destination), model_backend=backend)
         except Exception:
             shutil.rmtree(destination)
             raise
@@ -227,7 +228,7 @@ def run_training(config: dict, batch_id: str, emit=lambda **event: None, stop_fi
 
 
 def training_history(config: dict, run) -> list[dict[str, float]]:
-    task_config = for_task(config, run.task or TASK)
+    task_config = for_task(config, run.task or TASK, run.model_backend)
     folder = Path(task_config["paths"]["runs"]) / run.batch_id / f"train_{run.training_attempt:03d}"
     path = folder / "results.csv"
     try:
@@ -246,7 +247,11 @@ def training_history(config: dict, run) -> list[dict[str, float]]:
         return []
 
 
-def run_inference(config: dict, source: str, model_path: str, output: str, emit=lambda **event: None, task_name: str = TASK):
+def run_inference(config: dict, source: str, model_path: str, output: str, emit=lambda **event: None, task_name: str = TASK, model_backend: str | None = None):
+    task = for_task(config, task_name, model_backend)
+    if task["model_backend"] == "florence":
+        from .florence_backend import infer_florence
+        return infer_florence(task, source, model_path, output, emit)
     from ultralytics import YOLO
 
     source, model_path, output = Path(source).resolve(), Path(model_path).resolve(), Path(output).resolve()
@@ -260,7 +265,6 @@ def run_inference(config: dict, source: str, model_path: str, output: str, emit=
         raise ValueError("Images sharing a filename stem would overwrite inference labels.")
     output.mkdir(parents=True, exist_ok=False)
     model = YOLO(str(model_path))
-    task = for_task(config, task_name)
     records, errors = [], []
     for index, path in enumerate(images, 1):
         try:
